@@ -1,11 +1,11 @@
 ﻿using System;
-using System.Threading;
 using System.Threading.Tasks;
 using Foundatio.Jobs;
+using Foundatio.Logging;
 
 namespace Foundatio.Tests.Jobs {
     public class WithDependencyJob : JobBase {
-        public WithDependencyJob(MyDependency dependency) {
+        public WithDependencyJob(MyDependency dependency, ILoggerFactory loggerFactory = null) : base(loggerFactory) {
             Dependency = dependency;
         }
 
@@ -13,7 +13,7 @@ namespace Foundatio.Tests.Jobs {
 
         public int RunCount { get; set; }
 
-        protected override Task<JobResult> RunInternalAsync(CancellationToken cancellationToken) {
+        protected override Task<JobResult> RunInternalAsync(JobContext context) {
             RunCount++;
 
             return Task.FromResult(JobResult.Success);

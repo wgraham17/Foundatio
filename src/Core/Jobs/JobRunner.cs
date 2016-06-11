@@ -1,122 +1,170 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundatio.Extensions;
-using Foundatio.ServiceProviders;
-using Foundatio.Utility;
 using Foundatio.Logging;
+using Foundatio.Utility;
 
 namespace Foundatio.Jobs {
-    public class JobRunOptions {
-        public JobRunOptions() {
-            IterationLimit = -1;
-            InstanceCount = 1;
-            RunContinuous = true;
-        }
-
-        public string JobTypeName { get; set; }
-        public Type JobType { get; set; }
-        public bool RunContinuous { get; set; }
-        public TimeSpan? Interval { get; set; }
-        public int IterationLimit { get; set; }
-        public int InstanceCount { get; set; }
-    }
-
     public class JobRunner {
-        public static Task<JobResult> RunAsync(Type jobType, CancellationToken cancellationToken = default(CancellationToken)) {
-            return CreateJobInstance(jobType).RunAsync(cancellationToken);
+        private readonly ILogger _logger;
+        private string _jobName;
+        private readonly JobOptions _options;
+
+        public JobRunner(JobOptions options, ILoggerFactory loggerFactory = null) {
+            _logger = loggerFactory.CreateLogger<JobRunner>();
+            _options = options;
         }
 
-        public static Task RunUntilEmptyAsync<T>(CancellationToken cancellationToken = default(CancellationToken)) where T: IQueueProcessorJob {
-            var jobInstance = CreateJobInstance(typeof(T)) as IQueueProcessorJob;
-            if (jobInstance == null)
-                throw new ArgumentException("Type T must derive from IQueueProcessorJob.");
-
-            return jobInstance.RunUntilEmptyAsync(cancellationToken);
-        }
-
-        public static async Task RunContinuousAsync(Type jobType, TimeSpan? interval = null, int iterationLimit = -1, int instanceCount = 1, CancellationToken cancellationToken = default(CancellationToken)) {
-            var tasks = new List<Task>();
-            for (int i = 0; i < instanceCount; i++)
-                tasks.Add(Task.Run(async () => await CreateJobInstance(jobType).RunContinuousAsync(interval, iterationLimit, cancellationToken).AnyContext(), cancellationToken));
-
-            await Task.WhenAll(tasks).AnyContext();
-        }
-
-        public static Task RunContinuousAsync<T>(TimeSpan? interval = null, int iterationLimit = -1, int instanceCount = 1, CancellationToken cancellationToken = default(CancellationToken)) {
-            return RunContinuousAsync(typeof(T), interval, iterationLimit, instanceCount, cancellationToken);
-        }
-
-        public static async Task<int> RunAsync(JobRunOptions options, CancellationToken cancellationToken = default(CancellationToken)) {
-            ResolveJobType(options);
-            if (options.JobType == null)
-                return -1;
-
-            WatchForShutdown();
-            var linkedCancellationToken = CancellationTokenSource.CreateLinkedTokenSource(_cancellationTokenSource.Token, cancellationToken).Token;
-            if (options.RunContinuous)
-                await RunContinuousAsync(options.JobType, options.Interval, options.IterationLimit, options.InstanceCount, linkedCancellationToken).AnyContext();
-            else
-                return (await RunAsync(options.JobType, linkedCancellationToken).AnyContext()).IsSuccess ? 0 : -1;
-
-            return 0;
-        }
-
-        public static void ResolveJobType(JobRunOptions options) {
-            if (options.JobType == null)
-                options.JobType = TypeHelper.ResolveType(options.JobTypeName, typeof(JobBase));
-        }
-
-        public static JobBase CreateJobInstance(string jobTypeName) {
-            var jobType = TypeHelper.ResolveType(jobTypeName, typeof(JobBase));
-            if (jobType == null)
-                return null;
-
-            return CreateJobInstance(jobType);
-        }
-
-        public static JobBase CreateJobInstance(Type jobType) {
-            if (!typeof(JobBase).IsAssignableFrom(jobType)) {
-                Logger.Error().Message("Job Type must derive from Job.").Write();
-                return null;
+        public JobRunner(IJob instance, ILoggerFactory loggerFactory = null, TimeSpan? initialDelay = null, int instanceCount = 1, bool runContinuous = true, int iterationLimit = -1, TimeSpan? interval = null)
+            : this(new JobOptions {
+                  JobFactory = () => instance,
+                  InitialDelay = initialDelay,
+                  InstanceCount = instanceCount,
+                  IterationLimit = iterationLimit,
+                  RunContinuous = runContinuous,
+                  Interval = interval
+              }, loggerFactory) {
             }
 
-            var job = ServiceProvider.Current.GetService(jobType) as JobBase;
-            if (job == null) {
-                Logger.Error().Message("Unable to create job instance.").Write();
-                return null;
+        public JobRunner(Func<IJob> jobFactory, ILoggerFactory loggerFactory = null, TimeSpan? initialDelay = null, int instanceCount = 1, bool runContinuous = true, int iterationLimit = -1, TimeSpan? interval = null)
+            : this(new JobOptions {
+                JobFactory = jobFactory,
+                InitialDelay = initialDelay,
+                InstanceCount = instanceCount,
+                IterationLimit = iterationLimit,
+                RunContinuous = runContinuous,
+                Interval = interval
+            }, loggerFactory) {}
+
+        public CancellationTokenSource CancellationTokenSource { get; private set; }
+
+        public int RunInConsole() {
+            int result;
+            try {
+                CancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(GetShutdownCancellationToken(_logger));
+                var success = RunAsync(CancellationTokenSource.Token).GetAwaiter().GetResult();
+                result = success ? 0 : -1;
+
+                if (Debugger.IsAttached)
+                    Console.ReadKey();
+            } catch (FileNotFoundException e) {
+                _logger.Error(() => $"{e.GetMessage()} ({ e.FileName})");
+
+                if (Debugger.IsAttached)
+                    Console.ReadKey();
+
+                return 1;
+            } catch (Exception e) {
+                _logger.Error(e, "Job \"{jobName}\" error: {Message}", _jobName, e.GetMessage());
+
+                if (Debugger.IsAttached)
+                    Console.ReadKey();
+
+                return 1;
             }
 
-            return job;
+            return result;
         }
 
-        private static string _webJobsShutdownFile;
-        private static readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
-
-        private static void WatchForShutdown() {
-            ShutdownEventCatcher.Shutdown += args => {
-                _cancellationTokenSource.Cancel();
-                Logger.Info().Message("Job shutdown event signaled: {0}", args.Reason).Write();
-            };
-
-            _webJobsShutdownFile = Environment.GetEnvironmentVariable("WEBJOBS_SHUTDOWN_FILE");
-            if (String.IsNullOrEmpty(_webJobsShutdownFile))
-                return;
-
-            var watcher = new FileSystemWatcher(Path.GetDirectoryName(_webJobsShutdownFile));
-            watcher.Created += OnFileChanged;
-            watcher.Changed += OnFileChanged;
-            watcher.NotifyFilter = NotifyFilters.CreationTime | NotifyFilters.FileName | NotifyFilters.LastWrite;
-            watcher.IncludeSubdirectories = false;
-            watcher.EnableRaisingEvents = true;
+        public void RunInBackground(CancellationToken cancellationToken = default(CancellationToken)) {
+            if (_options.InstanceCount == 1) {
+                new Task(() => {
+                    try {
+                        RunAsync(cancellationToken).GetAwaiter().GetResult();
+                    } catch (Exception ex) {
+                        _logger.Error(ex, () => $"Error running job in background: {ex.Message}");
+                        throw;
+                    }
+                }, cancellationToken, TaskCreationOptions.LongRunning).Start();
+            } else {
+                var ignored = RunAsync(cancellationToken);
+            }
         }
 
-        private static void OnFileChanged(object sender, FileSystemEventArgs e) {
-            if (e.FullPath.IndexOf(Path.GetFileName(_webJobsShutdownFile), StringComparison.OrdinalIgnoreCase) >= 0) {
-                _cancellationTokenSource.Cancel();
-                Logger.Info().Message("Job shutdown signaled.").Write();
+        public async Task<bool> RunAsync(CancellationToken cancellationToken = default(CancellationToken)) {
+            if (_options.JobFactory == null) {
+                _logger.Error("JobFactory must be specified.");
+                return false;
+            }
+
+            var job = _options.JobFactory();
+            _jobName = TypeHelper.GetTypeDisplayName(job.GetType());
+
+            if (_options.InitialDelay.HasValue && _options.InitialDelay.Value > TimeSpan.Zero)
+                await Task.Delay(_options.InitialDelay.Value, cancellationToken).AnyContext();
+
+            if (_options.RunContinuous && _options.InstanceCount > 1) {
+                var tasks = new List<Task>();
+                for (int i = 0; i < _options.InstanceCount; i++) {
+                    var task = new Task(() => {
+                        try {
+                            var jobInstance = _options.JobFactory();
+                            jobInstance.RunContinuousAsync(_options.Interval, _options.IterationLimit, cancellationToken).GetAwaiter().GetResult();
+                        } catch (Exception ex) {
+                            _logger.Error(ex, () => $"Error running job instance: {ex.Message}");
+                            throw;
+                        }
+                    }, cancellationToken, TaskCreationOptions.LongRunning);
+                    tasks.Add(task);
+                    task.Start();
+                }
+
+                await Task.WhenAll(tasks).AnyContext();
+            } else if (_options.RunContinuous && _options.InstanceCount == 1) {
+                await job.RunContinuousAsync(_options.Interval, _options.IterationLimit, cancellationToken).AnyContext();
+            } else {
+                using (_logger.BeginScope(s => s.Property("job", _jobName))) {
+                    _logger.Trace("Job run \"{0}\" starting...", _jobName);
+                    var result = await job.TryRunAsync(cancellationToken).AnyContext();
+                    JobExtensions.LogResult(result, _logger, _jobName);
+
+                    return result.IsSuccess;
+                }
+            }
+
+            return true;
+        }
+
+        private static CancellationTokenSource _jobShutdownCancellationTokenSource;
+        private static readonly object _lock = new object();
+        public static CancellationToken GetShutdownCancellationToken(ILogger logger = null) {
+            if (_jobShutdownCancellationTokenSource != null)
+                return _jobShutdownCancellationTokenSource.Token;
+
+            lock (_lock) {
+                if (_jobShutdownCancellationTokenSource != null)
+                    return _jobShutdownCancellationTokenSource.Token;
+
+                _jobShutdownCancellationTokenSource = new CancellationTokenSource();
+                ShutdownEventCatcher.Shutdown += args => {
+                    _jobShutdownCancellationTokenSource.Cancel();
+                    logger?.Info("Job shutdown event signaled: {0}", args.Reason);
+                };
+
+                var webJobsShutdownFile = Environment.GetEnvironmentVariable("WEBJOBS_SHUTDOWN_FILE");
+                if (String.IsNullOrEmpty(webJobsShutdownFile))
+                    return _jobShutdownCancellationTokenSource.Token;
+
+                var handler = new FileSystemEventHandler((s, e) => {
+                    if (e.FullPath.IndexOf(Path.GetFileName(webJobsShutdownFile), StringComparison.OrdinalIgnoreCase) < 0)
+                        return;
+
+                    _jobShutdownCancellationTokenSource.Cancel();
+                    logger?.Info("Job shutdown signaled.");
+                });
+
+                var watcher = new FileSystemWatcher(Path.GetDirectoryName(webJobsShutdownFile));
+                watcher.Created += handler;
+                watcher.Changed += handler;
+                watcher.NotifyFilter = NotifyFilters.CreationTime | NotifyFilters.FileName | NotifyFilters.LastWrite;
+                watcher.IncludeSubdirectories = false;
+                watcher.EnableRaisingEvents = true;
+
+                return _jobShutdownCancellationTokenSource.Token;
             }
         }
     }

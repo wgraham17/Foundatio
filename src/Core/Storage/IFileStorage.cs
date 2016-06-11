@@ -30,13 +30,15 @@ namespace Foundatio.Storage {
     public static class FileStorageExtensions {
         public static Task<bool> SaveObjectAsync<T>(this IFileStorage storage, string path, T data, CancellationToken cancellationToken = default(CancellationToken)) {
             string json = JsonConvert.SerializeObject(data);
-            return storage.SaveFileAsync(path, new MemoryStream(Encoding.UTF8.GetBytes(json)), cancellationToken);
+            return storage.SaveFileAsync(path, new MemoryStream(Encoding.UTF8.GetBytes(json ?? String.Empty)), cancellationToken);
         }
         
         public static async Task<T> GetObjectAsync<T>(this IFileStorage storage, string path, CancellationToken cancellationToken = default(CancellationToken)) {
-            string fileContents;
-            using (Stream result = await storage.GetFileStreamAsync(path, cancellationToken).AnyContext())
-                fileContents = await new StreamReader(result).ReadToEndAsync().AnyContext();
+            string fileContents = null;
+            using (Stream stream = await storage.GetFileStreamAsync(path, cancellationToken).AnyContext()) {
+                if (stream != null)
+                    fileContents = await new StreamReader(stream).ReadToEndAsync().AnyContext();
+            }
 
             if (String.IsNullOrEmpty(fileContents))
                 return default(T);
@@ -50,12 +52,19 @@ namespace Foundatio.Storage {
         }
 
         public static async Task<string> GetFileContentsAsync(this IFileStorage storage, string path) {
-            using (var stream = await storage.GetFileStreamAsync(path).AnyContext())
-                return await new StreamReader(stream).ReadToEndAsync().AnyContext();
+            using (var stream = await storage.GetFileStreamAsync(path).AnyContext()) {
+                if (stream != null)
+                    return await new StreamReader(stream).ReadToEndAsync().AnyContext();
+            }
+
+            return null;
         }
 
         public static async Task<byte[]> GetFileContentsRawAsync(this IFileStorage storage, string path) {
             using (var stream = await storage.GetFileStreamAsync(path).AnyContext()) {
+                if (stream == null)
+                    return null;
+                
                 byte[] buffer = new byte[16 * 1024];
                 using (var ms = new MemoryStream()) {
                     int read;
@@ -69,7 +78,7 @@ namespace Foundatio.Storage {
         }
 
         public static Task<bool> SaveFileAsync(this IFileStorage storage, string path, string contents) {
-            return storage.SaveFileAsync(path, new MemoryStream(Encoding.UTF8.GetBytes(contents)));
+            return storage.SaveFileAsync(path, new MemoryStream(Encoding.UTF8.GetBytes(contents ?? String.Empty)));
         }
     }
 }

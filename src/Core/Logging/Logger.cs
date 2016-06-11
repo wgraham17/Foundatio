@@ -1,198 +1,187 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
-using System.Runtime.CompilerServices;
-using System.Threading;
+using Foundatio.Utility;
 
 namespace Foundatio.Logging {
-    /// <summary>
-    /// A simple logging class
-    /// </summary>
-    [DebuggerStepThrough]
-    public static class Logger {
-        private static Action<LogData> _logWriter;
-        private static LogLevel _minimumLogLevel = LogLevel.Trace;
-        private static readonly object _writerLock;
+    internal class Logger : ILogger {
+        private static readonly NullScope _nullScope = new NullScope();
 
-        private static readonly ThreadLocal<IDictionary<string, string>> _threadProperties;
-        private static readonly Lazy<IDictionary<string, string>> _globalProperties;
+        private readonly LoggerFactory _loggerFactory;
+        private readonly string _categoryName;
+        private LogLevel _minLogLevel;
+        private ILogger[] _loggers;
 
-        /// <summary>
-        /// Initializes the <see cref="Logger"/> class.
-        /// </summary>
-        static Logger() {
-            _writerLock = new object();
-            _logWriter = DebugWrite;
+        public Logger(LoggerFactory loggerFactory, string categoryName, LogLevel minLogLevel) {
+            _loggerFactory = loggerFactory;
+            _categoryName = categoryName;
+            _minLogLevel = minLogLevel;
 
-            _globalProperties = new Lazy<IDictionary<string, string>>(CreateGlobal);
-            _threadProperties = new ThreadLocal<IDictionary<string, string>>(CreateLocal);
-        }
-        
-        /// <summary>
-        /// Gets the global properties dictionary.  All values are copied to each log on write.
-        /// </summary>
-        /// <value>
-        /// The global properties dictionary.
-        /// </value>
-        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
-        public static IDictionary<string, string> GlobalProperties => _globalProperties.Value;
+            var providers = loggerFactory.GetProviders();
+            if (providers.Length <= 0)
+                return;
 
-        /// <summary>
-        /// Gets the thread-local properties dictionary.  All values are copied to each log on write.
-        /// </summary>
-        /// <value>
-        /// The thread-local properties dictionary.
-        /// </value>
-        [DebuggerBrowsable(DebuggerBrowsableState.Never)]
-        public static IDictionary<string, string> ThreadProperties => _threadProperties.Value;
-
-        /// <summary>
-        /// Start a fluent <see cref="LogBuilder" /> with the specified <see cref="LogLevel" />.
-        /// </summary>
-        /// <param name="logLevel">The log level.</param>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>
-        /// A fluent Logger instance.
-        /// </returns>
-        public static ILogBuilder Log(LogLevel logLevel, [CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(logLevel, callerFilePath);
+            _loggers = new ILogger[providers.Length];
+            for (var index = 0; index < providers.Length; index++)
+                _loggers[index] = providers[index].CreateLogger(categoryName);
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogBuilder" /> with the computed <see cref="LogLevel" />.
-        /// </summary>
-        /// <param name="logLevelFactory">The log level factory.</param>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>
-        /// A fluent Logger instance.
-        /// </returns>hrough]
-        public static ILogBuilder Log(Func<LogLevel> logLevelFactory, [CallerFilePath] string callerFilePath = null) {
-            var logLevel = (logLevelFactory != null) ? logLevelFactory() : LogLevel.Debug;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter) {
+            if (_loggers == null || logLevel < _minLogLevel)
+                return;
 
-            return CreateBuilder(logLevel, callerFilePath);
+            List<Exception> exceptions = null;
+            foreach (var logger in _loggers) {
+                try {
+                    logger.Log(logLevel, eventId, state, exception, formatter);
+                } catch (Exception ex) {
+                    if (exceptions == null)
+                        exceptions = new List<Exception>();
+
+                    exceptions.Add(ex);
+                }
+            }
+
+            if (exceptions != null && exceptions.Count > 0)
+                throw new AggregateException("An error occurred while writing to logger(s).", exceptions);
         }
 
+        public bool IsEnabled(LogLevel logLevel) {
+            if (_loggers == null)
+                return false;
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Trace"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Trace([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Trace, callerFilePath);
+            List<Exception> exceptions = null;
+            foreach (var logger in _loggers) {
+                try {
+                    if (logger.IsEnabled(logLevel))
+                        return true;
+                } catch (Exception ex) {
+                    if (exceptions == null)
+                        exceptions = new List<Exception>();
+
+                    exceptions.Add(ex);
+                }
+            }
+
+            if (exceptions != null && exceptions.Count > 0)
+                throw new AggregateException("An error occurred while writing to logger(s).", exceptions);
+
+            return false;
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Debug"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Debug([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Debug, callerFilePath);
+        public IDisposable BeginScope<TState, TScope>(Func<TState, TScope> scopeFactory, TState state) {
+            if (_loggers == null)
+                return _nullScope;
+
+            if (_loggers.Length == 1)
+                return _loggers[0].BeginScope(scopeFactory, state);
+
+            var loggers = _loggers;
+
+            var scope = new Scope(loggers.Length);
+            List<Exception> exceptions = null;
+            for (var index = 0; index < loggers.Length; index++) {
+                try {
+                    var disposable = loggers[index].BeginScope(scopeFactory, state);
+                    scope.SetDisposable(index, disposable);
+                } catch (Exception ex) {
+                    if (exceptions == null)
+                        exceptions = new List<Exception>();
+
+                    exceptions.Add(ex);
+                }
+            }
+
+            if (exceptions != null && exceptions.Count > 0)
+                throw new AggregateException("An error occurred while writing to logger(s).", exceptions);
+
+            return scope;
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Info"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Info([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Info, callerFilePath);
+        internal void AddProvider(ILoggerProvider provider) {
+            var logger = provider.CreateLogger(_categoryName);
+
+            int logIndex;
+            if (_loggers == null) {
+                logIndex = 0;
+                _loggers = new ILogger[1];
+            } else {
+                logIndex = _loggers.Length;
+                Array.Resize(ref _loggers, logIndex + 1);
+            }
+
+            _loggers[logIndex] = logger;
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Warn"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Warn([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Warn, callerFilePath);
+        internal void ChangeMinLogLevel(LogLevel minLogLevel) {
+            _minLogLevel = minLogLevel;
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Error"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Error([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Error, callerFilePath);
+        private class Scope : IDisposable {
+            private bool _isDisposed;
+
+            private IDisposable _disposable0;
+            private IDisposable _disposable1;
+            private readonly IDisposable[] _disposable;
+
+            public Scope(int count) {
+                if (count > 2)
+                    _disposable = new IDisposable[count - 2];
+            }
+
+            public void SetDisposable(int index, IDisposable disposable) {
+                if (index == 0)
+                    _disposable0 = disposable;
+                else if (index == 1)
+                    _disposable1 = disposable;
+                else
+                    _disposable[index - 2] = disposable;
+            }
+
+            public void Dispose() {
+                if (_isDisposed)
+                    return;
+
+                _disposable0?.Dispose();
+                _disposable1?.Dispose();
+
+                if (_disposable != null) {
+                    var count = _disposable.Length;
+                    for (var index = 0; index != count; ++index) {
+                        if (_disposable[index] != null)
+                            _disposable[index].Dispose();
+                    }
+                }
+
+                _isDisposed = true;
+            }
+
+            internal void Add(IDisposable disposable) {
+                throw new NotImplementedException();
+            }
         }
 
-        /// <summary>
-        /// Start a fluent <see cref="LogLevel.Fatal"/> logger.
-        /// </summary>
-        /// <param name="callerFilePath">The full path of the source file that contains the caller. This is the file path at the time of compile.</param>
-        /// <returns>A fluent Logger instance.</returns>
-        public static ILogBuilder Fatal([CallerFilePath] string callerFilePath = null) {
-            return CreateBuilder(LogLevel.Fatal, callerFilePath);
+        private class NullScope : IDisposable {
+            public void Dispose() {}
+        }
+    }
+
+    public class Logger<T> : ILogger<T> {
+        private readonly ILogger _logger;
+
+        public Logger(ILoggerFactory factory) {
+            _logger = factory != null ? factory.CreateLogger(TypeHelper.GetTypeDisplayName(typeof(T))) : NullLogger.Instance;
         }
 
-        /// <summary>
-        /// Set the global minimum log level.
-        /// </summary>
-        /// <param name="level">The minimum log level that will be logged.</param>
-        public static void SetMinimumLogLevel(LogLevel level) {
-            _minimumLogLevel = level;
+        IDisposable ILogger.BeginScope<TState, TScope>(Func<TState, TScope> scopeFactory, TState state) {
+            return _logger.BeginScope(scopeFactory, state);
         }
 
-        /// <summary>
-        /// Registers a <see langword="delegate"/> to write logs to.
-        /// </summary>
-        /// <param name="writer">The <see langword="delegate"/> to write logs to.</param>
-        public static void RegisterWriter(Action<LogData> writer) {
-            lock (_writerLock)
-                _logWriter = writer;
-        }
-        
-        private static Action<LogData> ResolveWriter() {
-            lock (_writerLock)
-                return _logWriter;
-        }
-        
-        private static void DebugWrite(LogData logData) {
-            System.Diagnostics.Debug.WriteLine(logData);
-        }
-        
-        private static ILogBuilder CreateBuilder(LogLevel logLevel, string callerFilePath) {
-            if (logLevel < _minimumLogLevel || logLevel == LogLevel.None)
-                return new NullLogBuilder();
-
-            string name = LoggerExtensions.GetFileNameWithoutExtension(callerFilePath ?? String.Empty);
-
-            var writer = ResolveWriter();
-            var builder = new LogBuilder(logLevel, writer);
-            builder.Logger(name);
-
-            MergeProperties(builder);
-
-            return builder;
-        }
-        
-        private static IDictionary<string, string> CreateLocal() {
-            var dictionary = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            dictionary.Add("ThreadId", Thread.CurrentThread.ManagedThreadId.ToString(CultureInfo.InvariantCulture));
-
-            return dictionary;
-        }
-        
-        private static IDictionary<string, string> CreateGlobal() {
-            var dictionary = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            dictionary.Add("MachineName", Environment.MachineName);
-
-            return dictionary;
+        bool ILogger.IsEnabled(LogLevel logLevel) {
+            return _logger.IsEnabled(logLevel);
         }
 
-        private static void MergeProperties(LogBuilder builder) {
-            // copy global properties to current builder only if it has been created
-            if (_globalProperties.IsValueCreated && _globalProperties.Value.Count > 0)
-                foreach (var pair in _globalProperties.Value)
-                    builder.Property(pair.Key, pair.Value);
-
-            // copy thread-local properties to current builder only if it has been created
-            if (_threadProperties.IsValueCreated && _threadProperties.Value.Count > 0)
-                foreach (var pair in _threadProperties.Value)
-                    builder.Property(pair.Key, pair.Value);
+        void ILogger.Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter) {
+            _logger.Log(logLevel, eventId, state, exception, formatter);
         }
     }
 }

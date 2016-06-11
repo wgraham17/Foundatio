@@ -3,8 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Foundatio.Extensions;
+using Foundatio.Caching;
+using Foundatio.Jobs;
+using Foundatio.Lock;
 using Foundatio.Logging;
+using Foundatio.Logging.Xunit;
 using Foundatio.Metrics;
 using Foundatio.Queues;
 using Foundatio.Tests.Utility;
@@ -13,79 +16,112 @@ using Xunit;
 using Xunit.Abstractions;
 
 namespace Foundatio.Tests.Jobs {
-    public abstract class JobQueueTestsBase: CaptureTests {
-        public JobQueueTestsBase(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) { }
+    public abstract class JobQueueTestsBase: TestWithLoggingBase {
+        public JobQueueTestsBase(ITestOutputHelper output) : base(output) { }
 
         protected abstract IQueue<SampleQueueWorkItem> GetSampleWorkItemQueue(int retries, TimeSpan retryDelay);
         
         public virtual async Task CanRunQueueJob() {
             const int workItemCount = 100;
-            var metrics = new InMemoryMetricsClient();
             var queue = GetSampleWorkItemQueue(retries: 0, retryDelay: TimeSpan.Zero);
-            await queue.DeleteQueueAsync().AnyContext();
-            queue.AttachBehavior(new MetricsQueueBehavior<SampleQueueWorkItem>(metrics, "test"));
+            await queue.DeleteQueueAsync();
 
-            metrics.StartDisplayingStats(TimeSpan.FromSeconds(1), _writer);
             var enqueueTask = Run.InParallel(workItemCount, async index => {
                 await queue.EnqueueAsync(new SampleQueueWorkItem {
                     Created = DateTime.Now,
                     Path = "somepath" + index
-                }).AnyContext();
+                });
             });
 
-            var job = new SampleQueueJob(queue, metrics);
-            await Task.Delay(10).AnyContext();
-            await Task.WhenAll(job.RunUntilEmptyAsync(), enqueueTask).AnyContext();
+            var job = new SampleQueueJob(queue, null, Log);
+            await Task.Delay(10);
+            await Task.WhenAll(job.RunUntilEmptyAsync(), enqueueTask);
 
-            metrics.DisplayStats(_writer);
-
-            var stats = await queue.GetQueueStatsAsync().AnyContext();
+            var stats = await queue.GetQueueStatsAsync();
             Assert.Equal(0, stats.Queued);
             Assert.Equal(workItemCount, stats.Enqueued);
             Assert.Equal(workItemCount, stats.Dequeued);
         }
-        
+
+        public virtual async Task CanRunQueueJobWithLockFail() {
+            const int workItemCount = 10;
+            const int allowedLockCount = 5;
+            var queue = GetSampleWorkItemQueue(retries: 3, retryDelay: TimeSpan.Zero);
+            await queue.DeleteQueueAsync();
+
+            Log.MinimumLevel = LogLevel.Trace;
+
+            var enqueueTask = Run.InParallel(workItemCount, async index => {
+                await queue.EnqueueAsync(new SampleQueueWorkItem {
+                    Created = DateTime.Now,
+                    Path = "somepath" + index
+                });
+            });
+
+            var lockProvider = new ThrottlingLockProvider(new InMemoryCacheClient(), allowedLockCount, TimeSpan.FromDays(1), Log);
+            var job = new SampleQueueJobWithLocking(queue, null, lockProvider, Log);
+            await Task.Delay(10);
+            await Task.WhenAll(job.RunUntilEmptyAsync(), enqueueTask);
+
+            var stats = await queue.GetQueueStatsAsync();
+            Assert.Equal(0, stats.Queued);
+            Assert.Equal(workItemCount, stats.Enqueued);
+            Assert.Equal(allowedLockCount, stats.Completed);
+            Assert.Equal(allowedLockCount * 4, stats.Abandoned);
+            Assert.Equal(allowedLockCount, stats.Deadletter);
+        }
+
         public virtual async Task CanRunMultipleQueueJobs() {
             const int jobCount = 5;
-            const int workItemCount = 15;
-            var metrics = new InMemoryMetricsClient();
-            metrics.StartDisplayingStats(TimeSpan.FromSeconds(1), _writer);
+            const int workItemCount = 100;
+
+            Log.SetLogLevel<SampleQueueJob>(LogLevel.Information);
+            Log.SetLogLevel<InMemoryMetricsClient>(LogLevel.None);
+
+            var metrics = new InMemoryMetricsClient(true, loggerFactory: Log);
 
             var queues = new List<IQueue<SampleQueueWorkItem>>();
             for (int i = 0; i < jobCount; i++) {
-                var q = GetSampleWorkItemQueue(retries: 3, retryDelay: TimeSpan.FromSeconds(1));
-                await q.DeleteQueueAsync().AnyContext();
-                q.AttachBehavior(new MetricsQueueBehavior<SampleQueueWorkItem>(metrics, "test"));
+                var q = GetSampleWorkItemQueue(retries: 1, retryDelay: TimeSpan.Zero);
+                await q.DeleteQueueAsync();
+                q.AttachBehavior(new MetricsQueueBehavior<SampleQueueWorkItem>(metrics, "test", Log));
                 queues.Add(q);
             }
+            _logger.Info("Done setting up queues");
 
             var enqueueTask = Run.InParallel(workItemCount, async index => {
                 var queue = queues[RandomData.GetInt(0, jobCount - 1)];
                 await queue.EnqueueAsync(new SampleQueueWorkItem {
                     Created = DateTime.Now,
                     Path = RandomData.GetString()
-                }).AnyContext();
+                });
             });
+            _logger.Info("Done enqueueing");
 
             var cancellationTokenSource = new CancellationTokenSource();
             await Run.InParallel(jobCount, async index => {
                 var queue = queues[index - 1];
-                var job = new SampleQueueJob(queue, metrics);
-                await job.RunUntilEmptyAsync(cancellationTokenSource.Token).AnyContext();
+                var job = new SampleQueueJob(queue, metrics, Log);
+                await job.RunUntilEmptyAsync(cancellationTokenSource.Token);
                 cancellationTokenSource.Cancel();
-            }).AnyContext();
+            });
+            _logger.Info("Done running jobs until empty");
 
-            await enqueueTask.AnyContext();
+            await enqueueTask;
 
             var queueStats = new List<QueueStats>();
             for (int i = 0; i < queues.Count; i++) {
-                var stats = await queues[i].GetQueueStatsAsync().AnyContext();
-                Logger.Info().Message($"Queue#{i}: Working: {stats.Working} Completed: {stats.Completed} Abandoned: {stats.Abandoned} Error: {stats.Errors} Deadletter: {stats.Deadletter}").Write();
+                var stats = await queues[i].GetQueueStatsAsync();
+                _logger.Info("Queue#{i}: Working: {working} Completed: {completed} Abandoned: {abandoned} Error: {errors} Deadletter: {deadletter}", i, stats.Working, stats.Completed, stats.Abandoned, stats.Errors, stats.Deadletter);
                 queueStats.Add(stats);
             }
+            _logger.Info("Done getting queue stats");
 
-            metrics.DisplayStats(_writer);
-            Assert.Equal(metrics.GetCount("completed"), queueStats.Sum(s => s.Completed));
+            await metrics.FlushAsync();
+            _logger.Info("Done flushing metrics");
+
+            var queueSummary = await metrics.GetQueueStatsAsync("test.samplequeueworkitem");
+            Assert.Equal(queueStats.Sum(s => s.Completed), queueSummary.Completed.Count);
             Assert.InRange(queueStats.Sum(s => s.Completed), 0, workItemCount);
          }
     }

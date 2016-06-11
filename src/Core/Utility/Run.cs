@@ -1,52 +1,54 @@
 ﻿using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Foundatio.Extensions;
+using Foundatio.Logging;
 
 namespace Foundatio.Utility {
     internal static class Run {
+        public static async Task DelayedAsync(TimeSpan delay, Func<Task> action) {
+            await Task.Run(async () => {
+                await Task.Delay(delay).AnyContext();
+                await action().AnyContext();
+            }).AnyContext();
+        }
+
         public static Task InParallel(int iterations, Func<int, Task> work) {
             return Task.WhenAll(Enumerable.Range(1, iterations).Select(i => Task.Run(() => work(i))));
         }
 
-        public static Task Multiple(int iterations, Func<int, Task> work) {
-            return Task.WhenAll(Enumerable.Range(1, iterations).Select(work));
+        public static async Task WithRetriesAsync(Func<Task> action, int maxAttempts = 5, TimeSpan? retryInterval = null, CancellationToken cancellationToken = default(CancellationToken), ILogger logger = null) {
+            await Run.WithRetriesAsync(async () => {
+                await action().AnyContext();
+                return TaskHelper.Completed;
+            }, maxAttempts, retryInterval, cancellationToken, logger).AnyContext();
         }
 
-        public static Task WithRetriesAsync(Action action, int attempts = 3, TimeSpan? retryInterval = null) {
-            return WithRetriesAsync<object>(() => {
-                action();
-                return null;
-            }, attempts, retryInterval);
-        }
-
-        public static async Task<T> WithRetriesAsync<T>(Func<Task<T>> action, int attempts = 3, TimeSpan? retryInterval = null) {
+        public static async Task<T> WithRetriesAsync<T>(Func<Task<T>> action, int maxAttempts = 5, TimeSpan? retryInterval = null, CancellationToken cancellationToken = default(CancellationToken), ILogger logger = null) {
             if (action == null)
                 throw new ArgumentNullException(nameof(action));
 
+            int attempts = 1;
+            var startTime = DateTime.UtcNow;
             do {
+                if (attempts > 1)
+                    logger?.Info($"Retrying {attempts.ToOrdinal()} attempt after {DateTime.UtcNow.Subtract(startTime).TotalMilliseconds}ms...");
+
                 try {
                     return await action().AnyContext();
-                } catch {
-                    if (attempts <= 0)
+                } catch (Exception ex) {
+                    if (attempts >= maxAttempts)
                         throw;
 
-                    if (retryInterval != null)
-                        await Task.Delay(retryInterval.Value).AnyContext();
-                    else
-                        await SleepBackOffMultiplierAsync(attempts).AnyContext();
+                    logger?.Error(ex, $"Retry error: {ex.Message}");
+                    await Task.Delay(retryInterval ?? TimeSpan.FromMilliseconds(attempts * 100), cancellationToken).AnyContext();
                 }
-            } while (attempts-- > 1);
 
-            throw new ApplicationException("Should not get here.");
-        }
-        
-        private static async Task SleepBackOffMultiplierAsync(int i) {
-            var rand = new Random(Guid.NewGuid().GetHashCode());
-            var nextTry = rand.Next(
-                (int)Math.Pow(i, 2), (int)Math.Pow(i + 1, 2) + 1);
+                attempts++;
+            } while (attempts <= maxAttempts && !cancellationToken.IsCancellationRequested);
 
-            await Task.Delay(nextTry).AnyContext();
+            throw new TaskCanceledException("Should not get here.");
         }
     }
 }

@@ -83,10 +83,10 @@ namespace Foundatio.Storage {
             if (limit.HasValue && limit.Value <= 0)
                 return new List<FileSpec>();
             
-            searchPattern = searchPattern != null ? searchPattern.Replace('\\', '/') : null;
+            searchPattern = searchPattern?.Replace('\\', '/');
             string prefix = searchPattern;
             Regex patternRegex = null;
-            int wildcardPos = searchPattern != null ? searchPattern.IndexOf('*') : -1;
+            int wildcardPos = searchPattern?.IndexOf('*') ?? -1;
             if (searchPattern != null && wildcardPos >= 0) {
                 patternRegex = new Regex("^" + Regex.Escape(searchPattern).Replace("\\*", ".*?") + "$");
                 int slashPos = searchPattern.LastIndexOf('/');
@@ -97,9 +97,10 @@ namespace Foundatio.Storage {
             BlobContinuationToken continuationToken = null;
             var blobs = new List<CloudBlockBlob>();
             do {
-                var listingResult = await _container.ListBlobsSegmentedAsync(prefix, true, BlobListingDetails.Metadata, null, continuationToken, null, null, cancellationToken).AnyContext();
-                
+                var listingResult = await _container.ListBlobsSegmentedAsync(prefix, true, BlobListingDetails.Metadata, limit, continuationToken, null, null, cancellationToken).AnyContext();
                 continuationToken = listingResult.ContinuationToken;
+
+                // TODO: Implement paging
                 blobs.AddRange(listingResult.Results.OfType<CloudBlockBlob>().MatchesPattern(patternRegex));
             }
             while (continuationToken != null && blobs.Count < limit);

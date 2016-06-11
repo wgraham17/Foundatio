@@ -3,7 +3,10 @@
 namespace Foundatio.Tests.Messaging {
     public class SimpleMessageA : ISimpleMessage {
         public string Data { get; set; }
+        public int Count { get; set; }
     }
+
+    public class DerivedSimpleMessageA : SimpleMessageA {}
 
     public class SimpleMessageB : ISimpleMessage {
         public string Data { get; set; }

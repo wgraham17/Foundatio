@@ -1,20 +1,29 @@
 using System.Threading.Tasks;
 using Foundatio.Messaging;
-using Foundatio.Tests.Utility;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Foundatio.Tests.Messaging {
     public class InMemoryMessageBusTests : MessageBusTestBase {
-        public InMemoryMessageBusTests(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) {}
+        public InMemoryMessageBusTests(ITestOutputHelper output) : base(output) {}
 
         protected override IMessageBus GetMessageBus() {
-            return new InMemoryMessageBus();
+            return new InMemoryMessageBus(Log);
         }
 
         [Fact]
         public override Task CanSendMessage() {
             return base.CanSendMessage();
+        }
+
+        [Fact]
+        public override Task CanHandleNullMessage() {
+            return base.CanHandleNullMessage();
+        }
+
+        [Fact]
+        public override Task CanSendDerivedMessage() {
+            return base.CanSendDerivedMessage();
         }
 
         [Fact]

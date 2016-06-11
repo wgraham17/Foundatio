@@ -2,7 +2,7 @@
 using System.Threading.Tasks;
 using Foundatio.Lock;
 using Foundatio.Caching;
-using Foundatio.Tests.Utility;
+using Foundatio.Logging;
 using Xunit;
 using Xunit.Abstractions;
 using Foundatio.Messaging;
@@ -10,14 +10,16 @@ using Foundatio.Tests.Locks;
 
 namespace Foundatio.Redis.Tests.Locks {
     public class RedisLockTests : LockTestBase {
-        public RedisLockTests(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) {}
+        public RedisLockTests(ITestOutputHelper output) : base(output) {
+            FlushAll();
+        }
 
         protected override ILockProvider GetThrottlingLockProvider(int maxHits, TimeSpan period) {
-            return new ThrottlingLockProvider(new RedisCacheClient(SharedConnection.GetMuxer()), maxHits, period);
+            return new ThrottlingLockProvider(new RedisCacheClient(SharedConnection.GetMuxer(), loggerFactory: Log), maxHits, period, Log);
         }
 
         protected override ILockProvider GetLockProvider() {
-            return new CacheLockProvider(new RedisCacheClient(SharedConnection.GetMuxer()), new RedisMessageBus(SharedConnection.GetMuxer().GetSubscriber()));
+            return new CacheLockProvider(new RedisCacheClient(SharedConnection.GetMuxer(), loggerFactory: Log), new RedisMessageBus(SharedConnection.GetMuxer().GetSubscriber(), loggerFactory: Log), Log);
         }
 
         [Fact]
@@ -33,6 +35,27 @@ namespace Foundatio.Redis.Tests.Locks {
         [Fact]
         public override Task WillThrottleCalls() {
             return base.WillThrottleCalls();
+        }
+
+        [Fact]
+        public override Task LockOneAtATime() {
+            return base.LockOneAtATime();
+        }
+
+        private void FlushAll() {
+            var endpoints = SharedConnection.GetMuxer().GetEndPoints(true);
+            if (endpoints.Length == 0)
+                return;
+
+            foreach (var endpoint in endpoints) {
+                var server = SharedConnection.GetMuxer().GetServer(endpoint);
+
+                try {
+                    server.FlushAllDatabases();
+                } catch (Exception ex) {
+                    _logger.Error(ex, "Error flushing redis");
+                }
+            }
         }
     }
 }

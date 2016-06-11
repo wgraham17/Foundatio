@@ -1,4 +1,5 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
 using Foundatio.Storage;
 using Foundatio.Tests.Storage;
 using Foundatio.Tests.Utility;
@@ -6,11 +7,12 @@ using Xunit;
 using Xunit.Abstractions;
 
 namespace Foundatio.Azure.Tests.Storage {
+    [Collection("AzureStorageIntegrationTests")]
     public class AzureStorageTests : FileStorageTestsBase {
-        public AzureStorageTests(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) {}
+        public AzureStorageTests(ITestOutputHelper output) : base(output) {}
 
         protected override IFileStorage GetStorage() {
-            if (ConnectionStrings.Get("AzureStorageConnectionString") == null)
+            if (String.IsNullOrEmpty(ConnectionStrings.Get("AzureStorageConnectionString")))
                 return null;
 
             return new AzureFileStorage(ConnectionStrings.Get("AzureStorageConnectionString"));

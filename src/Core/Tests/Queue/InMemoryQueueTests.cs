@@ -1,7 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Threading.Tasks;
+using Foundatio.Logging;
 using Foundatio.Queues;
-using Foundatio.Tests.Utility;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -9,18 +10,54 @@ namespace Foundatio.Tests.Queue {
     public class InMemoryQueueTests : QueueTestBase {
         private IQueue<SimpleWorkItem> _queue;
 
-        public InMemoryQueueTests(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) {}
+        public InMemoryQueueTests(ITestOutputHelper output) : base(output) {}
 
         protected override IQueue<SimpleWorkItem> GetQueue(int retries = 1, TimeSpan? workItemTimeout = null, TimeSpan? retryDelay = null, int deadLetterMaxItems = 100, bool runQueueMaintenance = true) {
             if (_queue == null)
-                _queue = new InMemoryQueue<SimpleWorkItem>(retries, retryDelay, workItemTimeout: workItemTimeout);
+                _queue = new InMemoryQueue<SimpleWorkItem>(retries, retryDelay, workItemTimeout: workItemTimeout, loggerFactory: Log);
 
             return _queue;
         }
 
         [Fact]
+        public async Task TestAsyncEvents() {
+            var q = new InMemoryQueue<SimpleWorkItem>(loggerFactory: Log);
+            q.Enqueuing.AddHandler(async (sender, args) => {
+                await Task.Delay(250);
+                _logger.Info("First Enqueuing.");
+            });
+            q.Enqueuing.AddHandler(async(sender, args) => {
+                await Task.Delay(250);
+                _logger.Info("Second Enqueuing.");
+            });
+            var e1 = q.Enqueued.AddHandler(async (sender, args) => {
+                await Task.Delay(250);
+                _logger.Info("First.");
+            });
+            q.Enqueued.AddHandler(async(sender, args) => {
+                await Task.Delay(250);
+                _logger.Info("Second.");
+            });
+            var sw = Stopwatch.StartNew();
+            await q.EnqueueAsync(new SimpleWorkItem());
+            sw.Stop();
+            _logger.Trace(sw.Elapsed.ToString());
+
+            e1.Dispose();
+            sw.Restart();
+            await q.EnqueueAsync(new SimpleWorkItem());
+            sw.Stop();
+            _logger.Trace(sw.Elapsed.ToString());
+        }
+
+        [Fact]
         public override Task CanQueueAndDequeueWorkItem() {
             return base.CanQueueAndDequeueWorkItem();
+        }
+
+        [Fact]
+        public override Task CanDequeueWithCancelledToken() {
+            return base.CanDequeueWithCancelledToken();
         }
 
         [Fact]
@@ -86,6 +123,21 @@ namespace Foundatio.Tests.Queue {
         [Fact]
         public override Task CanRunWorkItemWithMetrics() {
             return base.CanRunWorkItemWithMetrics();
+        }
+
+        [Fact]
+        public override Task CanRenewLock() {
+            return base.CanRenewLock();
+        }
+
+        [Fact]
+        public override Task CanAbandonQueueEntryOnce() {
+            return base.CanAbandonQueueEntryOnce();
+        }
+
+        [Fact]
+        public override Task CanCompleteQueueEntryOnce() {
+            return base.CanCompleteQueueEntryOnce();
         }
     }
 }

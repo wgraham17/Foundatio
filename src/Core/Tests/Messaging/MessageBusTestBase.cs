@@ -3,17 +3,18 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundatio.Extensions;
+using Foundatio.Logging;
+using Foundatio.Logging.Xunit;
 using Foundatio.Tests.Utility;
 using Foundatio.Messaging;
 using Xunit;
-using Foundatio.Logging;
 using Foundatio.Utility;
 using Nito.AsyncEx;
 using Xunit.Abstractions;
 
 namespace Foundatio.Tests.Messaging {
-    public abstract class MessageBusTestBase : CaptureTests {
-        protected MessageBusTestBase(CaptureFixture fixture, ITestOutputHelper output) : base(fixture, output) {}
+    public abstract class MessageBusTestBase : TestWithLoggingBase {
+        protected MessageBusTestBase(ITestOutputHelper output) : base(output) {}
 
         protected virtual IMessageBus GetMessageBus() {
             return null;
@@ -27,19 +28,62 @@ namespace Foundatio.Tests.Messaging {
             using (messageBus) {
                 var resetEvent = new AsyncManualResetEvent(false);
                 messageBus.Subscribe<SimpleMessageA>(msg => {
-                    Logger.Trace().Message("Got message").Write();
+                    _logger.Trace("Got message");
                     Assert.Equal("Hello", msg.Data);
                     resetEvent.Set();
-                    Logger.Trace().Message("Set event").Write();
+                    _logger.Trace("Set event");
                 });
 
-                await Task.Delay(100).AnyContext();
+                await Task.Delay(100);
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 Trace.WriteLine("Published one...");
 
-                await resetEvent.WaitAsync(TimeSpan.FromSeconds(5)).AnyContext();
+                await resetEvent.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        public virtual async Task CanHandleNullMessage() {
+            var messageBus = GetMessageBus();
+            if (messageBus == null)
+                return;
+
+            using (messageBus) {
+                var resetEvent = new AsyncManualResetEvent(false);
+                messageBus.Subscribe<object>(msg => {
+                    throw new ApplicationException();
+                });
+
+                await Task.Delay(100);
+                await messageBus.PublishAsync<object>(null);
+                Trace.WriteLine("Published one...");
+
+                await resetEvent.WaitAsync(TimeSpan.FromSeconds(1));
+            }
+        }
+        
+        public virtual async Task CanSendDerivedMessage() {
+            var messageBus = GetMessageBus();
+            if (messageBus == null)
+                return;
+
+            using (messageBus) {
+                var resetEvent = new AsyncManualResetEvent(false);
+                messageBus.Subscribe<SimpleMessageA>(msg => {
+                    _logger.Trace("Got message");
+                    Assert.Equal("Hello", msg.Data);
+                    resetEvent.Set();
+                    _logger.Trace("Set event");
+                });
+
+                await Task.Delay(100);
+                await messageBus.PublishAsync(new DerivedSimpleMessageA {
+                    Data = "Hello"
+                });
+                Trace.WriteLine("Published one...");
+
+                await resetEvent.WaitAsync(TimeSpan.FromSeconds(5));
             }
         }
 
@@ -53,22 +97,26 @@ namespace Foundatio.Tests.Messaging {
                 var countdown = new AsyncCountdownEvent(numConcurrentMessages);
 
                 messageBus.Subscribe<SimpleMessageA>(msg => {
-                    Logger.Trace().Message("Got message").Write();
+                    if (msg.Count % 500 == 0)
+                        _logger.Trace("Got 500 messages");
                     Assert.Equal("Hello", msg.Data);
                     countdown.Signal();
-                    Logger.Trace().Message("Set event").Write();
+                    if (msg.Count % 500 == 0)
+                        _logger.Trace("Set 500 events");
                 });
 
                 var sw = Stopwatch.StartNew();
 
                 await Run.InParallel(numConcurrentMessages, async i => {
                     await messageBus.PublishAsync(new SimpleMessageA {
-                        Data = "Hello"
-                    }, TimeSpan.FromMilliseconds(RandomData.GetInt(0, 300))).AnyContext();
-                    Logger.Trace().Message("Published one...").Write();
-                }).AnyContext();
+                        Data = "Hello",
+                        Count = i
+                    }, TimeSpan.FromMilliseconds(RandomData.GetInt(0, 300)));
+                    if (i % 500 == 0)
+                        _logger.Trace("Published 500 messages...");
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
                 sw.Stop();
                 
                 Assert.True(sw.Elapsed > TimeSpan.FromMilliseconds(80));
@@ -96,9 +144,9 @@ namespace Foundatio.Tests.Messaging {
                 });
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
             }
         }
 
@@ -122,9 +170,9 @@ namespace Foundatio.Tests.Messaging {
                 });
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
                 Assert.Equal(0, countdown.CurrentCount);
             }
         }
@@ -145,9 +193,9 @@ namespace Foundatio.Tests.Messaging {
                 });
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await resetEvent.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await resetEvent.WaitAsync(TimeSpan.FromSeconds(2));
             }
         }
 
@@ -164,15 +212,15 @@ namespace Foundatio.Tests.Messaging {
                 });
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 await messageBus.PublishAsync(new SimpleMessageB {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 await messageBus.PublishAsync(new SimpleMessageC {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(5)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(5));
             }
         }
 
@@ -188,19 +236,21 @@ namespace Foundatio.Tests.Messaging {
                 });
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 await messageBus.PublishAsync(new SimpleMessageB {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 await messageBus.PublishAsync(new SimpleMessageC {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
             }
         }
 
         public virtual async Task WontKeepMessagesWithNoSubscribers() {
+            Log.MinimumLevel = LogLevel.Trace;
+
             var messageBus = GetMessageBus();
             if (messageBus == null)
                 return;
@@ -208,16 +258,16 @@ namespace Foundatio.Tests.Messaging {
             using (messageBus) {
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await Task.Delay(100).AnyContext();
+                await Task.Delay(100);
                 var resetEvent = new AsyncAutoResetEvent(false);
                 messageBus.Subscribe<SimpleMessageA>(msg => {
                     Assert.Equal("Hello", msg.Data);
                     resetEvent.Set();
                 });
 
-                await Assert.ThrowsAsync<TaskCanceledException>(async () => await resetEvent.WaitAsync(TimeSpan.FromMilliseconds(100)).AnyContext()).AnyContext();
+                await Assert.ThrowsAsync<TaskCanceledException>(async () => await resetEvent.WaitAsync(TimeSpan.FromMilliseconds(100)));
             }
         }
         
@@ -232,7 +282,7 @@ namespace Foundatio.Tests.Messaging {
                 long messageCount = 0;
                 var cancellationTokenSource = new CancellationTokenSource();
                 messageBus.Subscribe<SimpleMessageA>(msg => {
-                    Logger.Trace().Message("SimpleAMessage received").Write();
+                    _logger.Trace("SimpleAMessage received");
                     Interlocked.Increment(ref messageCount);
                     cancellationTokenSource.Cancel();
                     countdown.Signal();
@@ -242,18 +292,18 @@ namespace Foundatio.Tests.Messaging {
 
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
                 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
                 Assert.Equal(0, countdown.CurrentCount);
                 Assert.Equal(1, messageCount);
 
                 countdown = new AsyncCountdownEvent(1);
                 await messageBus.PublishAsync(new SimpleMessageA {
                     Data = "Hello"
-                }).AnyContext();
+                });
 
-                await countdown.WaitAsync(TimeSpan.FromSeconds(2)).AnyContext();
+                await countdown.WaitAsync(TimeSpan.FromSeconds(2));
                 Assert.Equal(0, countdown.CurrentCount);
                 Assert.Equal(1, messageCount);
             }

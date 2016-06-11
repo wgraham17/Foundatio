@@ -7,10 +7,18 @@ namespace Foundatio.Caching {
             HasValue = hasValue;
         }
 
-        public bool HasValue { get; private set; }
+        public bool HasValue { get; }
 
-        public T Value { get; private set; }
+        public bool IsNull => Value == null;
 
-        public static CacheValue<T> Null => new CacheValue<T>(default(T), false);
+        public T Value { get; }
+
+        public static CacheValue<T> Null => new CacheValue<T>(default(T), true);
+
+        public static CacheValue<T> NoValue => new CacheValue<T>(default(T), false);
+
+        public override string ToString() {
+            return Value?.ToString() ?? "<null>";
+        }
     }
 }

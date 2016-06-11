@@ -13,27 +13,29 @@ namespace Foundatio.Metrics {
         private Socket _socket;
         private readonly IPEndPoint _endPoint;
         private readonly string _prefix;
+        private readonly ILogger _logger;
 
-        public StatsDMetricsClient(string serverName = "127.0.0.1", int port = 8125, string prefix = null) {
+        public StatsDMetricsClient(string serverName = "127.0.0.1", int port = 8125, string prefix = null, ILoggerFactory loggerFactory = null) {
+            _logger = loggerFactory.CreateLogger<StatsDMetricsClient>();
             _endPoint = new IPEndPoint(IPAddress.Parse(serverName), port);
 
             if (!String.IsNullOrEmpty(prefix))
                 _prefix = prefix.EndsWith(".") ? prefix : String.Concat(prefix, ".");
         }
 
-        public Task CounterAsync(string statName, int value = 1) {
-            Send(BuildMetric("c", statName, value.ToString(CultureInfo.InvariantCulture)));
-            return TaskHelper.Completed();
+        public Task CounterAsync(string name, int value = 1) {
+            Send(BuildMetric("c", name, value.ToString(CultureInfo.InvariantCulture)));
+            return TaskHelper.Completed;
         }
 
-        public Task GaugeAsync(string statName, double value) {
-            Send(BuildMetric("g", statName, value.ToString(CultureInfo.InvariantCulture)));
-            return TaskHelper.Completed();
+        public Task GaugeAsync(string name, double value) {
+            Send(BuildMetric("g", name, value.ToString(CultureInfo.InvariantCulture)));
+            return TaskHelper.Completed;
         }
 
-        public Task TimerAsync(string statName, long milliseconds) {
-            Send(BuildMetric("ms", statName, milliseconds.ToString(CultureInfo.InvariantCulture)));
-            return TaskHelper.Completed();
+        public Task TimerAsync(string name, int milliseconds) {
+            Send(BuildMetric("ms", name, milliseconds.ToString(CultureInfo.InvariantCulture)));
+            return TaskHelper.Completed;
         }
 
         private string BuildMetric(string type, string statName, string value) {
@@ -48,10 +50,9 @@ namespace Foundatio.Metrics {
                 byte[] data = Encoding.ASCII.GetBytes(metric);
 
                 EnsureSocket();
-                if (_socket != null)
-                    _socket.SendTo(data, _endPoint);
+                _socket?.SendTo(data, _endPoint);
             } catch (Exception ex) {
-                Logger.Error().Exception(ex).Message("An error occurred while sending the metrics: {0}", ex.Message).Write();
+                _logger.Error(ex, "An error occurred while sending the metrics: {0}", ex.Message);
                 ResetUdpClient();
             }
         }
@@ -77,7 +78,7 @@ namespace Foundatio.Metrics {
                 try {
                     _socket.Close();
                 } catch (Exception ex) {
-                    Logger.Error().Exception(ex).Message("An error occurred while calling Close() on the socket.").Write();
+                    _logger.Error(ex, "An error occurred while calling Close() on the socket.");
                 } finally {
                     _socket = null;
                 }

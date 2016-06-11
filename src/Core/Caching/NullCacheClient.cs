@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Foundatio.Caching {
@@ -12,12 +13,12 @@ namespace Foundatio.Caching {
             return Task.FromResult(0);
         }
 
-        public Task<CacheValue<T>> TryGetAsync<T>(string key) {
-            return Task.FromResult(CacheValue<T>.Null);
+        public Task<CacheValue<T>> GetAsync<T>(string key) {
+            return Task.FromResult(CacheValue<T>.NoValue);
         }
 
-        public Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys) { 
-            return Task.FromResult<IDictionary<string, T>>(new Dictionary<string, T>());
+        public Task<IDictionary<string, CacheValue<T>>> GetAllAsync<T>(IEnumerable<string> keys) { 
+            return Task.FromResult<IDictionary<string, CacheValue<T>>>(keys.ToDictionary(k => k, k => CacheValue<T>.NoValue));
         }
 
         public Task<bool> AddAsync<T>(string key, T value, TimeSpan? expiresIn = null) {
@@ -36,8 +37,12 @@ namespace Foundatio.Caching {
             return Task.FromResult(true);
         }
 
-        public Task<long> IncrementAsync(string key, int amount = 1, TimeSpan? expiresIn = null) {
-            return Task.FromResult(0L);
+        public Task<double> IncrementAsync(string key, double amount = 1, TimeSpan? expiresIn = null) {
+            return Task.FromResult(amount);
+        }
+
+        public Task<bool> ExistsAsync(string key) {
+            return Task.FromResult(false);
         }
 
         public Task<TimeSpan?> GetExpirationAsync(string key) {
@@ -46,6 +51,14 @@ namespace Foundatio.Caching {
 
         public Task SetExpirationAsync(string key, TimeSpan expiresIn) {
             return Task.FromResult(0);
+        }
+
+        public Task<double> SetIfHigherAsync(string key, double value, TimeSpan? expiresIn = null) {
+            return Task.FromResult(value);
+        }
+
+        public Task<double> SetIfLowerAsync(string key, double value, TimeSpan? expiresIn = null) {
+            return Task.FromResult(value);
         }
 
         public void Dispose() {}
